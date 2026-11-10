@@ -12,6 +12,7 @@ import sys
 import threading
 import time
 import urllib.parse
+import base64
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -19,6 +20,23 @@ TRADER_DIR = BASE_DIR / "trader"
 # Self-contained local skills folder fallback to global
 SKILLS_DIR = BASE_DIR / "skills" if (BASE_DIR / "skills").exists() else Path("/Users/ribo/.gemini/config/skills")
 PORT = 8080
+
+def load_auth_credentials():
+    """Load DASHBOARD_USER and DASHBOARD_PASSWORD from .env file if present."""
+    env_file = BASE_DIR / ".env"
+    user = os.environ.get("DASHBOARD_USER")
+    pwd = os.environ.get("DASHBOARD_PASSWORD")
+    if env_file.exists():
+        with open(env_file, "r") as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    k, v = line.split("=", 1)
+                    k = k.strip()
+                    v = v.strip().strip('"').strip("'")
+                    if k == "DASHBOARD_USER": user = v
+                    elif k == "DASHBOARD_PASSWORD": pwd = v
+    return user, pwd
 
 auto_pilot_running = False
 auto_pilot_logs = []
@@ -163,7 +181,39 @@ class TraderAPIHandler(http.server.SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(BASE_DIR / "public"), **kwargs)
 
+    def check_auth(self):
+        expected_user, expected_pwd = load_auth_credentials()
+        # If no user or password set in .env or environment, allow freely
+        if not expected_user or not expected_pwd:
+            return True
+        auth_header = self.headers.get("Authorization")
+        if not auth_header or not auth_header.startswith("Basic "):
+            return False
+        try:
+            encoded_creds = auth_header.split(" ", 1)[1]
+            decoded = base64.b64decode(encoded_creds).decode("utf-8")
+            u, p = decoded.split(":", 1)
+            return (u == expected_user and p == expected_pwd)
+        except Exception:
+            return False
+
+    def require_auth(self):
+        self.send_response(401)
+        self.send_header("WWW-Authenticate", 'Basic realm="Day Trader Dashboard"')
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.end_headers()
+        self.wfile.write(b"<h1>401 Accesso Richiesto</h1><p>Inserisci Username e Password per visualizzare la Dashboard.</p>")
+
+    def do_HEAD(self):
+        if not self.check_auth():
+            self.require_auth()
+            return
+        super().do_HEAD()
+
     def do_GET(self):
+        if not self.check_auth():
+            self.require_auth()
+            return
         url = urllib.parse.urlparse(self.path)
         path = url.path
         query = urllib.parse.parse_qs(url.query)
@@ -217,6 +267,9 @@ class TraderAPIHandler(http.server.SimpleHTTPRequestHandler):
             super().do_GET()
 
     def do_POST(self):
+        if not self.check_auth():
+            self.require_auth()
+            return
         url = urllib.parse.urlparse(self.path)
         path = url.path
         content_len = int(self.headers.get("Content-Length", 0))
