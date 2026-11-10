@@ -42,6 +42,25 @@ Environment=PYTHONUNBUFFERED=1
 WantedBy=multi-user.target
 EOF
 
+sudo tee /etc/systemd/system/daytrader-bot.service >/dev/null <<EOF
+[Unit]
+Description=Day Trader Telegram Bot Service
+After=network-online.target daytrader.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ribo
+WorkingDirectory=$APP_DIR
+ExecStart=/usr/bin/python3 $APP_DIR/telegram_bot.py
+Restart=always
+RestartSec=10
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
 sudo tee /etc/systemd/system/daytrader-tunnel.service >/dev/null <<EOF
 [Unit]
 Description=Cloudflare Tunnel for Day Trader Dashboard (port 8080)
@@ -61,8 +80,9 @@ WantedBy=multi-user.target
 EOF
 
 sudo systemctl daemon-reload
-sudo systemctl enable daytrader.service daytrader-tunnel.service
+sudo systemctl enable daytrader.service daytrader-bot.service daytrader-tunnel.service
 sudo systemctl restart daytrader.service
+sudo systemctl restart daytrader-bot.service
 sudo systemctl restart daytrader-tunnel.service
 
 echo "Attesa generazione link pubblico Cloudflare (8s)..."
