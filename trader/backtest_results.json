@@ -1,0 +1,71 @@
+{
+  "budget_eur": 1000.0,
+  "final_capital_eur": 908.37,
+  "net_pnl_eur": -91.63,
+  "return_pct": -9.16,
+  "total_trades": 268,
+  "wins": 121,
+  "losses": 147,
+  "win_rate": 45.1,
+  "profit_factor": 0.84,
+  "gross_profit_eur": 478.12,
+  "gross_loss_eur": -569.75,
+  "per_ticker": {
+    "AAPL": {
+      "trades": 30,
+      "wins": 17,
+      "losses": 13,
+      "win_rate": 56.666666666666664,
+      "pnl_eur": 2.4886316370079253
+    },
+    "NVDA": {
+      "trades": 31,
+      "wins": 13,
+      "losses": 18,
+      "win_rate": 41.935483870967744,
+      "pnl_eur": -22.405441284179677
+    },
+    "AMZN": {
+      "trades": 36,
+      "wins": 11,
+      "losses": 25,
+      "win_rate": 30.555555555555557,
+      "pnl_eur": -69.83204029224535
+    },
+    "MSFT": {
+      "trades": 33,
+      "wins": 16,
+      "losses": 17,
+      "win_rate": 48.484848484848484,
+      "pnl_eur": -4.145090738932434
+    },
+    "TSLA": {
+      "trades": 35,
+      "wins": 17,
+      "losses": 18,
+      "win_rate": 48.57142857142857,
+      "pnl_eur": 27.848904079861192
+    },
+    "RACE": {
+      "trades": 39,
+      "wins": 19,
+      "losses": 20,
+      "win_rate": 48.717948717948715,
+      "pnl_eur": 4.268536603009078
+    },
+    "GOOGL": {
+      "trades": 34,
+      "wins": 14,
+      "losses": 20,
+      "win_rate": 41.17647058823529,
+      "pnl_eur": -23.426970305265975
+    },
+    "META": {
+      "trades": 30,
+      "wins": 14,
+      "losses": 16,
+      "win_rate": 46.666666666666664,
+      "pnl_eur": -6.430223253038195
+    }
+  }
+}

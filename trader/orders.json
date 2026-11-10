@@ -1,0 +1,31 @@
+{
+  "created_by": "trader-budget",
+  "created_at": "2026-11-09T20:30:00Z",
+  "status": "proposed",
+  "paper": true,
+  "note": "Proposals only. Nothing is placed until trader-risk passes each order and you say yes to it in the chat.",
+  "source": "trader/plan.json (AAPL orb 2026-11-09)",
+  "orders": [
+    {
+      "symbol": "AAPL",
+      "side": "buy",
+      "qty": "2",
+      "type": "market",
+      "time_in_force": "day",
+      "order_class": "bracket",
+      "take_profit_limit_price": "353.14",
+      "stop_loss_stop_price": "347.56",
+      "why": "opening-range breakout on AAPL: 2 shares, bound by your position cap (2 x 2.79 = $5.58 at the stop)",
+      "plan": {
+        "entry": 350.35,
+        "stop": 347.56,
+        "target": 353.14,
+        "risk_per_share": 2.79,
+        "max_loss": 5.58,
+        "setup": "orb",
+        "entry_time": "10:25 AM",
+        "flat_by": "15:55"
+      }
+    }
+  ]
+}
