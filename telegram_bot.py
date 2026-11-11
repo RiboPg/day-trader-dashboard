@@ -11,6 +11,7 @@ Features:
 
 import urllib.request
 import urllib.parse
+import urllib.error
 import json
 import time
 import os
@@ -66,6 +67,10 @@ def send_telegram_request(token, method, payload=None):
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
             return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        err_body = e.read().decode("utf-8", errors="ignore")
+        print(f"[Telegram Error] {method}: HTTP Error {e.code}: {err_body}")
+        return None
     except Exception as e:
         print(f"[Telegram Error] {method}: {e}")
         return None
