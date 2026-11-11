@@ -182,6 +182,9 @@ class TraderAPIHandler(http.server.SimpleHTTPRequestHandler):
         super().__init__(*args, directory=str(BASE_DIR / "public"), **kwargs)
 
     def check_auth(self):
+        # Consenti sempre le chiamate interne da localhost (es. telegram_bot.py)
+        if self.client_address[0] in ("127.0.0.1", "::1", "localhost"):
+            return True
         expected_user, expected_pwd = load_auth_credentials()
         # If no user or password set in .env or environment, allow freely
         if not expected_user or not expected_pwd:

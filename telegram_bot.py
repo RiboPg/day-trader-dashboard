@@ -15,6 +15,7 @@ import urllib.error
 import json
 import time
 import os
+import base64
 import threading
 from datetime import datetime
 from pathlib import Path
@@ -24,6 +25,8 @@ BASE_DIR = Path(__file__).resolve().parent
 def load_env():
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
     chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+    dash_user = os.environ.get("DASHBOARD_USER")
+    dash_pwd = os.environ.get("DASHBOARD_PASSWORD")
     env_file = BASE_DIR / ".env"
     if env_file.exists():
         with open(env_file, "r") as f:
@@ -34,7 +37,9 @@ def load_env():
                     k, v = k.strip(), v.strip().strip('"').strip("'")
                     if k == "TELEGRAM_BOT_TOKEN": token = v
                     elif k == "TELEGRAM_CHAT_ID": chat_id = v
-    return token, chat_id
+                    elif k == "DASHBOARD_USER": dash_user = v
+                    elif k == "DASHBOARD_PASSWORD": dash_pwd = v
+    return token, chat_id, dash_user, dash_pwd
 
 def save_chat_id_to_env(new_chat_id):
     """Salva automaticamente il chat_id scoperto nel file .env."""
@@ -90,12 +95,19 @@ def send_message(token, chat_id, text, reply_markup=None):
 
 def api_call(endpoint, method="GET", payload=None):
     url = f"http://127.0.0.1:8080{endpoint}"
+    _, _, dash_user, dash_pwd = load_env()
     headers = {"Content-Type": "application/json"}
+    if dash_user and dash_pwd:
+        creds = base64.b64encode(f"{dash_user}:{dash_pwd}".encode("utf-8")).decode("utf-8")
+        headers["Authorization"] = f"Basic {creds}"
     data = json.dumps(payload).encode("utf-8") if payload else None
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        with urllib.request.urlopen(req, timeout=90) as resp:
             return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        err_msg = e.read().decode("utf-8", errors="ignore")
+        return {"error": f"HTTP {e.code}: {err_msg or e.reason}"}
     except Exception as e:
         return {"error": str(e)}
 
@@ -156,7 +168,6 @@ def format_pelosi():
         text += f"📄 Doc {p['doc_id']}: <a href=\"{p['url']}\">Scarica PDF Ufficiale</a>\n\n"
     return text
 
-# Memoria degli avvisi inviati per non ripetere lo stesso identico segnale nello stesso giorno
 recent_alerts_sent = {}
 active_chat_id = None
 
@@ -168,14 +179,12 @@ def proactive_scanner_worker(token):
     global active_chat_id, recent_alerts_sent
     print("[Proactive Scanner] Avviato thread di monitoraggio autonomo.")
     
-    # Attende 10 secondi per assicurarsi che app.py sia pronto
     time.sleep(10)
-    
     last_market_open_alert_day = None
 
     while True:
         try:
-            _, env_chat_id = load_env()
+            _, env_chat_id, _, _ = load_env()
             target_chat = active_chat_id or env_chat_id
             
             if target_chat and target_chat != "TUO_CHAT_ID":
@@ -207,7 +216,6 @@ def proactive_scanner_worker(token):
                         conf = r.get("ai_confidence", 0)
                         price = r.get("price", 0.0)
                         
-                        # Se la confidenza è >= 70% e non abbiamo inviato un alert nelle ultime 2 ore
                         last_sent = recent_alerts_sent.get(sym, 0)
                         if conf >= 70 and (time.time() - last_sent > 7200):
                             recent_alerts_sent[sym] = time.time()
@@ -223,22 +231,21 @@ def proactive_scanner_worker(token):
                             )
                             markup = {
                                 "inline_keyboard": [
-                                    [{"text": f"🛒 Conferma Acquisto {sym}", "callback_data": f"sim_{sym}"}],
+                                    [{"text": f"🛒 Conferma Acquisto {sym}", "callback_data": f"buy_{sym}"}],
                                     [{"text": f"🔍 Simula Scenari {sym}", "callback_data": f"sim_{sym}"}]
                                 ]
                             }
                             send_message(token, target_chat, alert_msg, markup)
-                            print(f"[Proactive Scanner] Notifica automatica inviata per {sym} a chat {target_chat}!")
+                            print(f"[Proactive Scanner] Notifica inviata per {sym} a chat {target_chat}!")
 
         except Exception as e:
             print(f"[Proactive Scanner Error] {e}")
 
-        # Ripete il controllo ogni 5 minuti
         time.sleep(300)
 
 def telegram_bot_worker():
     global active_chat_id
-    token, default_chat_id = load_env()
+    token, default_chat_id, _, _ = load_env()
     if not token or token == "TUO_TOKEN_TELEGRAM":
         print("[Telegram Bot] Token non configurato nel file .env. Bot in attesa di configurazione.")
         return
@@ -246,7 +253,6 @@ def telegram_bot_worker():
     active_chat_id = default_chat_id
     print(f"[Telegram Bot] Avviato con successo per il token: {token[:6]}...!")
     
-    # Se il chat_id è già noto, invia subito un segnale di benvenuto/online al riavvio
     if active_chat_id and active_chat_id != "TUO_CHAT_ID":
         send_message(token, active_chat_id, 
             "🟢 <b>DAY TRADER BOT ONLINE SUL RASPBERRY PI</b>\n\n"
@@ -256,7 +262,6 @@ def telegram_bot_worker():
             "Digita /help per la lista comandi o /scan per testare adesso."
         )
 
-    # Avvia il thread del monitoraggio autonomo in background
     scanner_thread = threading.Thread(target=proactive_scanner_worker, args=(token,), daemon=True)
     scanner_thread.start()
 
@@ -272,7 +277,7 @@ def telegram_bot_worker():
                 for u in updates.get("result", []):
                     last_update_id = u["update_id"]
 
-                    # Handle Callback Queries (Click sui pulsanti inline)
+                    # Click sui pulsanti inline
                     if "callback_query" in u:
                         cb = u["callback_query"]
                         cb_data = cb.get("data", "")
@@ -281,16 +286,25 @@ def telegram_bot_worker():
                         if cb_data.startswith("sim_"):
                             ticker = cb_data.split("_")[1]
                             send_message(token, cb_chat, f"⏳ Calcolo Time Machine per <b>{ticker}</b> (10.000 scenari)...")
-                            res = api_call("/api/simulate", method="POST", payload={"ticker": ticker, "date": "2026-11-09"})
-                            tm = res.get("timemachine", {})
-                            mc = tm.get("mc", {})
-                            plan = res.get("plan", {})
-                            orders = res.get("orders", {}).get("orders", [])
+                            res = api_call("/api/simulate", method="POST", payload={"ticker": ticker})
+                            
+                            if res.get("error"):
+                                send_message(token, cb_chat, f"⚠️ <b>Errore simulazione {ticker}:</b>\n<code>{res.get('error')}</code>")
+                                continue
+
+                            tm = res.get("timemachine") or {}
+                            mc = tm.get("mc") or {}
+                            plan = res.get("plan") or {}
+                            orders = (res.get("orders") or {}).get("orders", [])
                             shares = orders[0].get("qty", 1) if orders else 1
+
+                            if not plan:
+                                send_message(token, cb_chat, f"⚠️ Nessun dato di sessione trovato per <b>{ticker}</b>.")
+                                continue
 
                             pt = (mc.get("p_target") or 0) * 100
                             ps = (mc.get("p_stop") or 0) * 100
-                            verdict = tm.get("verdict", "")
+                            verdict = tm.get("verdict", "Analisi completata")
 
                             text = f"🎯 <b>TIME MACHINE: {ticker}</b>\n\n"
                             text += f"⚖️ <b>Verdetto:</b> {verdict}\n"
@@ -316,13 +330,12 @@ def telegram_bot_worker():
                             else:
                                 send_message(token, cb_chat, f"❌ <b>Errore Ordine:</b> {res.get('error')}")
 
-                    # Handle Text Messages
+                    # Messaggi di testo
                     if "message" in u and "text" in u["message"]:
                         msg = u["message"]
                         chat_id = msg["chat"]["id"]
                         text = msg["text"].strip()
 
-                        # Se l'utente scrive, memorizziamo il chat_id attivo per gli alert push
                         if active_chat_id != chat_id:
                             active_chat_id = chat_id
                             save_chat_id_to_env(chat_id)
@@ -363,9 +376,9 @@ def telegram_bot_worker():
                                 "🧪 <b>TEST SEGNALE AUTOMATICO</b>\n\n"
                                 "Questo è un test di notifica push autonoma dal Raspberry Pi:\n"
                                 "🎯 <b>Titolo:</b> AAPL (Apple Inc.)\n"
-                                "💵 <b>Prezzo:</b> $225.40\n"
+                                "💵 <b>Prezzo:</b> $353.68\n"
                                 "🔥 <b>Affidabilità:</b> 85% (Setup ORB Breakout confermato)\n"
-                                "🪂 <b>Stop Loss:</b> $221.80 | 🎯 <b>Target 1R:</b> $229.00\n\n"
+                                "🪂 <b>Stop Loss:</b> $351.38 | 🎯 <b>Target 1R:</b> $355.98\n\n"
                                 "Il canale di comunicazione Telegram è perfettamente funzionante!"
                             )
                             markup = {
@@ -397,16 +410,25 @@ def telegram_bot_worker():
                         elif text.upper() in ["AAPL", "NVDA", "MSFT", "AMZN", "TSLA", "RACE", "GOOGL", "META", "AZN"]:
                             ticker = text.upper()
                             send_message(token, chat_id, f"⏳ Calcolo Time Machine per <b>{ticker}</b> (10.000 replay)...")
-                            res = api_call("/api/simulate", method="POST", payload={"ticker": ticker, "date": "2026-11-09"})
-                            tm = res.get("timemachine", {})
-                            mc = tm.get("mc", {})
-                            plan = res.get("plan", {})
-                            orders = res.get("orders", {}).get("orders", [])
+                            res = api_call("/api/simulate", method="POST", payload={"ticker": ticker})
+                            
+                            if res.get("error"):
+                                send_message(token, chat_id, f"⚠️ <b>Errore simulazione {ticker}:</b>\n<code>{res.get('error')}</code>")
+                                continue
+
+                            tm = res.get("timemachine") or {}
+                            mc = tm.get("mc") or {}
+                            plan = res.get("plan") or {}
+                            orders = (res.get("orders") or {}).get("orders", [])
                             shares = orders[0].get("qty", 1) if orders else 1
+
+                            if not plan:
+                                send_message(token, chat_id, f"⚠️ Nessun dato di sessione trovato per <b>{ticker}</b>.")
+                                continue
 
                             pt = (mc.get("p_target") or 0) * 100
                             ps = (mc.get("p_stop") or 0) * 100
-                            verdict = tm.get("verdict", "")
+                            verdict = tm.get("verdict", "Analisi completata")
 
                             resp_text = f"🎯 <b>ANALISI TIME MACHINE: {ticker}</b>\n\n"
                             resp_text += f"⚖️ <b>Verdetto:</b> {verdict}\n"
