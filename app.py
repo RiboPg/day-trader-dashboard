@@ -461,7 +461,7 @@ def auto_pilot_worker():
 if __name__ == "__main__":
     t = threading.Thread(target=auto_pilot_worker, daemon=True)
     t.start()
-    server_address = ("127.0.0.1", PORT)
+    server_address = ("0.0.0.0", PORT)
     httpd = http.server.ThreadingHTTPServer(server_address, TraderAPIHandler)
     print(f"=====================================================")
     print(f"🚀 Day Trader Dashboard in esecuzione su:")

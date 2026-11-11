@@ -3,9 +3,10 @@
 Telegram Bot for Day Trader Dashboard.
 Standalone, standard library (urllib.request) - ZERO pip dependencies needed!
 Features:
-- Long polling for Telegram commands: /start, /help, /scan, /status, /portfolio, /pelosi, /buy <TICKER>
-- Interactive Inline Keyboards (Pulsanti cliccabili sotto i messaggi: "Simula", "Acquista", "Chiudi Posizione")
-- Auto-Alerts: Broadcasts to your chat when a new breakout triggers or market opens!
+- Long polling for Telegram commands: /start, /help, /scan, /consigliati, /status, /portfolio, /pelosi, /pilot, /test
+- Interactive Inline Keyboards (Pulsanti cliccabili: "Simula", "Acquista", "Chiudi Posizione")
+- Proactive Background Scanner: Invia segnali automatici su Telegram appena individua breakout/opportunità!
+- Notifica immediata di avvio (Startup Ping) su Telegram per confermare che il Raspberry Pi è online.
 """
 
 import urllib.request
@@ -14,6 +15,7 @@ import json
 import time
 import os
 import threading
+from datetime import datetime
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -33,6 +35,27 @@ def load_env():
                     elif k == "TELEGRAM_CHAT_ID": chat_id = v
     return token, chat_id
 
+def save_chat_id_to_env(new_chat_id):
+    """Salva automaticamente il chat_id scoperto nel file .env."""
+    env_file = BASE_DIR / ".env"
+    lines = []
+    found = False
+    if env_file.exists():
+        with open(env_file, "r") as f:
+            for line in f:
+                if line.startswith("TELEGRAM_CHAT_ID="):
+                    lines.append(f"TELEGRAM_CHAT_ID={new_chat_id}\n")
+                    found = True
+                else:
+                    lines.append(line)
+    if not found:
+        lines.append(f"\nTELEGRAM_CHAT_ID={new_chat_id}\n")
+    try:
+        with open(env_file, "w") as f:
+            f.writelines(lines)
+    except Exception as e:
+        print(f"[Bot] Impossibile salvare chat_id in .env: {e}")
+
 def send_telegram_request(token, method, payload=None):
     if not token or token == "TUO_TOKEN_TELEGRAM":
         return None
@@ -48,6 +71,8 @@ def send_telegram_request(token, method, payload=None):
         return None
 
 def send_message(token, chat_id, text, reply_markup=None):
+    if not chat_id:
+        return None
     payload = {
         "chat_id": chat_id,
         "text": text,
@@ -80,11 +105,12 @@ def format_status():
     pnl_icon = "🟢" if pnl >= 0 else "🔴"
     pnl_sign = "+" if pnl >= 0 else ""
 
-    text = f"📊 <b>DAY TRADER STATUS</b>\n\n"
+    text = f"📊 <b>DAY TRADER STATUS (Raspberry Pi)</b>\n\n"
     text += f"💰 <b>Cassa Libera:</b> ${cash:,.2f}\n"
     text += f"📈 <b>P&L Totale:</b> {pnl_icon} {pnl_sign}${pnl:.2f}\n"
     text += f"💼 <b>Posizioni Aperte:</b> {pos_count}\n"
-    text += f"🤖 <b>Pilota Automatico:</b> {auto}\n"
+    text += f"🤖 <b>Pilota Proattivo:</b> {auto}\n"
+    text += f"⏰ <i>Aggiornato: {datetime.now().strftime('%H:%M:%S')}</i>"
     return text
 
 def format_recommendations():
@@ -125,13 +151,110 @@ def format_pelosi():
         text += f"📄 Doc {p['doc_id']}: <a href=\"{p['url']}\">Scarica PDF Ufficiale</a>\n\n"
     return text
 
+# Memoria degli avvisi inviati per non ripetere lo stesso identico segnale nello stesso giorno
+recent_alerts_sent = {}
+active_chat_id = None
+
+def proactive_scanner_worker(token):
+    """
+    Thread autonomo che esegue scansioni continue e SPARA NOTIFICHE PUSH
+    su Telegram all'apertura del mercato e ogni volta che individua un setup ad alta confidenza.
+    """
+    global active_chat_id, recent_alerts_sent
+    print("[Proactive Scanner] Avviato thread di monitoraggio autonomo.")
+    
+    # Attende 10 secondi per assicurarsi che app.py sia pronto
+    time.sleep(10)
+    
+    last_market_open_alert_day = None
+
+    while True:
+        try:
+            _, env_chat_id = load_env()
+            target_chat = active_chat_id or env_chat_id
+            
+            if target_chat and target_chat != "TUO_CHAT_ID":
+                now = datetime.now()
+                current_day = now.strftime("%Y-%m-%d")
+                weekday = now.weekday() # 0 = Lunedì, 4 = Venerdì
+
+                # Notifica di apertura Wall Street (15:30 CET nei giorni feriali)
+                if weekday < 5 and now.hour == 15 and 28 <= now.minute <= 35:
+                    if last_market_open_alert_day != current_day:
+                        last_market_open_alert_day = current_day
+                        send_message(token, target_chat, 
+                            "🔔 <b>WALL STREET APERTA! (15:30 CET)</b>\n"
+                            "Avvio scanner automatico alla ricerca di breakout e pattern 1R.\n"
+                            "Se trovo occasioni favorevoli, riceverai subito la notifica qui!"
+                        )
+
+                # Esegui scansione di mercato
+                api_call("/api/scan", method="POST", payload={
+                    "mode": "daily",
+                    "symbols": "AAPL,NVDA,MSFT,AMZN,TSLA,RACE,AZN,GOOGL,META"
+                })
+
+                # Controlla raccomandazioni
+                recs = api_call("/api/recommendations")
+                if isinstance(recs, list) and len(recs) > 0:
+                    for r in recs:
+                        sym = r.get("symbol")
+                        conf = r.get("ai_confidence", 0)
+                        price = r.get("price", 0.0)
+                        
+                        # Se la confidenza è >= 70% e non abbiamo inviato un alert nelle ultime 2 ore
+                        last_sent = recent_alerts_sent.get(sym, 0)
+                        if conf >= 70 and (time.time() - last_sent > 7200):
+                            recent_alerts_sent[sym] = time.time()
+                            
+                            reasons_text = "\n".join([f"• {x}" for x in r.get("reasons", [])])
+                            alert_msg = (
+                                f"🚨 <b>NUOVA OPPORTUNITÀ RILEVATA DALL'AI!</b>\n\n"
+                                f"🎯 <b>Titolo:</b> {sym}\n"
+                                f"💵 <b>Prezzo:</b> ${price:.2f}\n"
+                                f"🔥 <b>Affidabilità Algoritmo:</b> {conf}%\n\n"
+                                f"<b>Analisi Tecnica:</b>\n{reasons_text}\n\n"
+                                f"Vuoi acquistare questo titolo con stop automatico e target 1R?"
+                            )
+                            markup = {
+                                "inline_keyboard": [
+                                    [{"text": f"🛒 Conferma Acquisto {sym}", "callback_data": f"sim_{sym}"}],
+                                    [{"text": f"🔍 Simula Scenari {sym}", "callback_data": f"sim_{sym}"}]
+                                ]
+                            }
+                            send_message(token, target_chat, alert_msg, markup)
+                            print(f"[Proactive Scanner] Notifica automatica inviata per {sym} a chat {target_chat}!")
+
+        except Exception as e:
+            print(f"[Proactive Scanner Error] {e}")
+
+        # Ripete il controllo ogni 5 minuti
+        time.sleep(300)
+
 def telegram_bot_worker():
+    global active_chat_id
     token, default_chat_id = load_env()
     if not token or token == "TUO_TOKEN_TELEGRAM":
         print("[Telegram Bot] Token non configurato nel file .env. Bot in attesa di configurazione.")
         return
 
+    active_chat_id = default_chat_id
     print(f"[Telegram Bot] Avviato con successo per il token: {token[:6]}...!")
+    
+    # Se il chat_id è già noto, invia subito un segnale di benvenuto/online al riavvio
+    if active_chat_id and active_chat_id != "TUO_CHAT_ID":
+        send_message(token, active_chat_id, 
+            "🟢 <b>DAY TRADER BOT ONLINE SUL RASPBERRY PI</b>\n\n"
+            "📍 <b>Host:</b> Raspberry Pi (192.168.1.130:8080)\n"
+            "🤖 <b>Scanner Proattivo:</b> ATTIVO (controlla il mercato ogni 5 min)\n"
+            "🔔 Ti invierò una notifica automatica appena un titolo supera il 70% di affidabilità!\n\n"
+            "Digita /help per la lista comandi o /scan per testare adesso."
+        )
+
+    # Avvia il thread del monitoraggio autonomo in background
+    scanner_thread = threading.Thread(target=proactive_scanner_worker, args=(token,), daemon=True)
+    scanner_thread.start()
+
     last_update_id = 0
 
     while True:
@@ -149,7 +272,6 @@ def telegram_bot_worker():
                         cb = u["callback_query"]
                         cb_data = cb.get("data", "")
                         cb_chat = cb["message"]["chat"]["id"]
-                        cb_msg_id = cb["message"]["message_id"]
 
                         if cb_data.startswith("sim_"):
                             ticker = cb_data.split("_")[1]
@@ -195,17 +317,24 @@ def telegram_bot_worker():
                         chat_id = msg["chat"]["id"]
                         text = msg["text"].strip()
 
+                        # Se l'utente scrive, memorizziamo il chat_id attivo per gli alert push
+                        if active_chat_id != chat_id:
+                            active_chat_id = chat_id
+                            save_chat_id_to_env(chat_id)
+
                         if text in ["/start", "/help"]:
                             welcome = (
-                                "🤖 <b>BENVENUTO NEL BOT DAY TRADER AI</b>\n\n"
-                                "Comandi disponibili:\n"
-                                "⚡ /scan — Scansiona il mercato e mostra i Top 3 titoli consigliati\n"
-                                "🎯 /consigliati — Vedi le 3 azioni più promettenti adesso\n"
-                                "📊 /status — Cassa disponibile, P&L e stato del bot\n"
-                                "💼 /portfolio — Elenco delle tue posizioni aperte\n"
-                                "🏛️ /pelosi — Ultimi trade depositati da Nancy Pelosi alla Camera\n"
-                                "🤖 /pilot — Attiva o disattiva il Pilota Automatico\n\n"
-                                "Puoi anche digitare direttamente il nome di un'azione (es. <code>AAPL</code>, <code>NVDA</code> o <code>RACE</code>) per simulare l'ingresso!"
+                                "🤖 <b>DAY TRADER BOT AI (Raspberry Pi)</b>\n\n"
+                                "Il bot monitora automaticamente il mercato azionario ogni 5 minuti e ti invia notifiche push non appena un titolo soddisfa i criteri di ingresso.\n\n"
+                                "Comandi manuali disponibili:\n"
+                                "⚡ /scan — Avvia scansione immediata su Wall Street\n"
+                                "🎯 /consigliati — I 3 titoli più promettenti in questo momento\n"
+                                "📊 /status — Saldo cassa, P&L e stato del bot\n"
+                                "💼 /portfolio — Posizioni azionarie aperte\n"
+                                "🧪 /test — Simula una notifica di segnale di acquisto\n"
+                                "🏛️ /pelosi — Ultimi trade depositati alla Camera USA\n"
+                                "🤖 /pilot — Attiva/Disattiva pilota automatico web\n\n"
+                                "💡 <i>Puoi anche digitare direttamente il ticker (es. AAPL, NVDA, TSLA) per fare una simulazione rapida!</i>"
                             )
                             send_message(token, chat_id, welcome)
 
@@ -223,6 +352,23 @@ def telegram_bot_worker():
 
                         elif text == "/portfolio":
                             send_message(token, chat_id, format_portfolio())
+
+                        elif text == "/test":
+                            sample_text = (
+                                "🧪 <b>TEST SEGNALE AUTOMATICO</b>\n\n"
+                                "Questo è un test di notifica push autonoma dal Raspberry Pi:\n"
+                                "🎯 <b>Titolo:</b> AAPL (Apple Inc.)\n"
+                                "💵 <b>Prezzo:</b> $225.40\n"
+                                "🔥 <b>Affidabilità:</b> 85% (Setup ORB Breakout confermato)\n"
+                                "🪂 <b>Stop Loss:</b> $221.80 | 🎯 <b>Target 1R:</b> $229.00\n\n"
+                                "Il canale di comunicazione Telegram è perfettamente funzionante!"
+                            )
+                            markup = {
+                                "inline_keyboard": [
+                                    [{"text": "🛒 Simula Acquisto AAPL", "callback_data": "sim_AAPL"}]
+                                ]
+                            }
+                            send_message(token, chat_id, sample_text, markup)
 
                         elif text == "/scan":
                             send_message(token, chat_id, "🔍 <i>Avvio scansione su Wall Street in corso...</i>")
