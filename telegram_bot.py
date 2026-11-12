@@ -6,6 +6,7 @@ Features:
 - Long polling for Telegram commands: /start, /help, /scan, /consigliati, /status, /portfolio, /pelosi, /pilot, /test
 - Interactive Inline Keyboards (Pulsanti cliccabili: "Simula", "Acquista", "Chiudi Posizione")
 - Proactive Background Scanner: Invia segnali automatici su Telegram appena individua breakout/opportunità!
+- Automatic Position Guardian: Monitora ogni 30s Stop Loss, Take Profit 1R e chiusura fine giornata (21:55 CET).
 - Notifica immediata di avvio (Startup Ping) su Telegram per confermare che il Raspberry Pi è online.
 """
 
@@ -111,6 +112,37 @@ def api_call(endpoint, method="GET", payload=None):
     except Exception as e:
         return {"error": str(e)}
 
+def get_live_price(symbol):
+    """Interroga rapidamente il prezzo live da Yahoo in tempo reale."""
+    url = f"https://query2.finance.yahoo.com/v8/finance/chart/{symbol}?range=1d&interval=1m"
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    try:
+        with urllib.request.urlopen(req, timeout=6) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            meta = data["chart"]["result"][0]["meta"]
+            return meta.get("regularMarketPrice")
+    except Exception:
+        return None
+
+def is_market_open():
+    """
+    Verifica se Wall Street (NYSE/NASDAQ) è aperta per le contrattazioni regolari.
+    Orario: Lunedì-Venerdì dalle 09:30 alle 16:00 ora di New York (15:30 - 22:00 CET).
+    """
+    try:
+        from zoneinfo import ZoneInfo
+        ny_now = datetime.now(ZoneInfo("America/New_York"))
+    except Exception:
+        import datetime as dt
+        ny_now = datetime.utcnow() - dt.timedelta(hours=5)
+
+    if ny_now.weekday() >= 5: # Sabato e Domenica
+        return False
+
+    minute_of_day = ny_now.hour * 60 + ny_now.minute
+    # 09:30 ET fino alle 16:00 ET
+    return (9 * 60 + 30) <= minute_of_day < (16 * 60)
+
 def format_status():
     status = api_call("/api/status")
     port = status.get("portfolio", {})
@@ -118,15 +150,17 @@ def format_status():
     pnl = port.get("total_profit_loss", 0.0)
     pos_count = len(port.get("positions", []))
     auto = "🟢 ATTIVO" if status.get("auto_pilot") else "⚪ OFF"
+    market_str = "🟢 APERTO" if is_market_open() else "🔴 CHIUSO (Apre alle 15:30 CET)"
 
     pnl_icon = "🟢" if pnl >= 0 else "🔴"
     pnl_sign = "+" if pnl >= 0 else ""
 
     text = f"📊 <b>DAY TRADER STATUS (Raspberry Pi)</b>\n\n"
+    text += f"🏛️ <b>Mercato Wall Street:</b> {market_str}\n"
     text += f"💰 <b>Cassa Libera:</b> ${cash:,.2f}\n"
     text += f"📈 <b>P&L Totale:</b> {pnl_icon} {pnl_sign}${pnl:.2f}\n"
     text += f"💼 <b>Posizioni Aperte:</b> {pos_count}\n"
-    text += f"🤖 <b>Pilota Proattivo:</b> {auto}\n"
+    text += f"🤖 <b>Pilota Automatico:</b> {auto}\n"
     text += f"⏰ <i>Aggiornato: {datetime.now().strftime('%H:%M:%S')}</i>"
     return text
 
@@ -148,15 +182,25 @@ def format_portfolio():
     port = api_call("/api/portfolio")
     positions = port.get("positions", [])
     if not positions:
-        return "💼 <b>Il tuo portafoglio è vuoto.</b>\nNessuna posizione aperta al momento."
+        return "💼 <b>Il tuo portafoglio è vuoto.</b>\nNessuna posizione aperta al momento.", None
     
     text = f"💼 <b>POSIZIONI APERTE ({len(positions)})</b>\n\n"
+    buttons = []
     for p in positions:
-        text += f"🔹 <b>{p['symbol']}</b> ({p['shares']} azioni a ${p['entry_price']:.2f})\n"
-        text += f"   • Investiti: ${p['total_invested']:.2f}\n"
-        text += f"   • Target (1R): ${p['target_price']:.2f} (+${p['potential_gain']:.2f})\n"
-        text += f"   • Stop Loss: ${p['stop_price']:.2f} (-${p['max_loss']:.2f})\n\n"
-    return text
+        sym = p.get("symbol", "TITOLO")
+        pos_id = p.get("id")
+        cur_pr = get_live_price(sym)
+        cur_str = f" (${cur_pr:.2f})" if cur_pr else ""
+        
+        text += f"🔹 <b>{sym}</b>{cur_str}\n"
+        text += f"   • Azioni: {p.get('shares')} a carico ${p.get('entry_price', 0):.2f}\n"
+        text += f"   • Investiti: ${p.get('total_invested', 0):.2f}\n"
+        text += f"   • 🎯 Target (1R): ${p.get('target_price', 0):.2f} (+${p.get('potential_gain', 0):.2f})\n"
+        text += f"   • 🪂 Stop Loss: ${p.get('stop_price', 0):.2f} (-${p.get('max_loss', 0):.2f})\n\n"
+        buttons.append([{"text": f"🛑 Chiudi {sym} a Mercato", "callback_data": f"close_{pos_id}"}])
+        
+    markup = {"inline_keyboard": buttons} if buttons else None
+    return text, markup
 
 def format_pelosi():
     list_ptr = api_call("/api/pelosi?limit=5")
@@ -171,14 +215,94 @@ def format_pelosi():
 recent_alerts_sent = {}
 active_chat_id = None
 
+def portfolio_guardian_worker(token):
+    """
+    Angelo custode del portafoglio:
+    Monitora in background ogni 30 secondi tutte le posizioni aperte.
+    - Se tocca lo Stop Loss -> CHIUDE SUBITO IN AUTOMATICO e ti avvisa!
+    - Se tocca il Take Profit (1R) -> CHIUDE SUBITO IN AUTOMATICO e ti avvisa!
+    - Alle 21:55 CET (fine sessione USA) -> CHIUDE A MERCATO (regola day trader: no overnight hold).
+    """
+    print("[Portfolio Guardian] Angelo Custode del Portafoglio attivo.")
+    time.sleep(10)
+
+    while True:
+        try:
+            _, env_chat_id, _, _ = load_env()
+            target_chat = active_chat_id or env_chat_id
+
+            port = api_call("/api/portfolio")
+            positions = port.get("positions", [])
+
+            if positions and isinstance(positions, list):
+                # Se il mercato USA è chiuso, l'angelo custode attende l'apertura
+                if not is_market_open():
+                    time.sleep(60)
+                    continue
+
+                now = datetime.now()
+                # 21:55 CET nei giorni feriali (15:55 ET, chiusura borsa)
+                is_session_end = (now.weekday() < 5 and now.hour == 21 and now.minute >= 55)
+
+                for pos in list(positions):
+                    pos_id = pos.get("id")
+                    sym = pos.get("symbol")
+                    stop_pr = float(pos.get("stop_price") or 0.0)
+                    target_pr = float(pos.get("target_price") or 0.0)
+                    
+                    price = get_live_price(sym)
+                    if not price:
+                        continue
+
+                    # 1. STOP LOSS AUTOMATICO
+                    if stop_pr > 0 and price <= stop_pr:
+                        api_call("/api/close-position", method="POST", payload={"id": pos_id, "exit_type": "STOP"})
+                        if target_chat and target_chat != "TUO_CHAT_ID":
+                            send_message(token, target_chat,
+                                f"🛑 <b>STOP LOSS ESEGUITO IN AUTOMATICO!</b>\n\n"
+                                f"🎯 <b>Titolo:</b> {sym}\n"
+                                f"💵 <b>Prezzo Uscita:</b> ${price:.2f} (Stop fissato a ${stop_pr:.2f})\n"
+                                f"📉 <b>Perdita limitata:</b> -${pos.get('max_loss', 0):.2f}\n\n"
+                                f"<i>La posizione è stata chiusa in automatico a protezione rigida del capitale.</i>"
+                            )
+                        print(f"[Guardian] STOP LOSS scattato per {sym} a ${price:.2f}")
+
+                    # 2. TAKE PROFIT AUTOMATICO (1R)
+                    elif target_pr > 0 and price >= target_pr:
+                        api_call("/api/close-position", method="POST", payload={"id": pos_id, "exit_type": "TARGET"})
+                        if target_chat and target_chat != "TUO_CHAT_ID":
+                            send_message(token, target_chat,
+                                f"🎯 <b>TAKE PROFIT RAGGIUNTO IN AUTOMATICO!</b>\n\n"
+                                f"🎯 <b>Titolo:</b> {sym}\n"
+                                f"💵 <b>Prezzo Uscita:</b> ${price:.2f} (Target fissato a ${target_pr:.2f})\n"
+                                f"🟢 <b>Profitto incassato:</b> +${pos.get('potential_gain', 0):.2f}\n\n"
+                                f"<i>Obiettivo 1R centrato con successo! Il guadagno è stato accreditato sulla cassa.</i>"
+                            )
+                        print(f"[Guardian] TAKE PROFIT scattato per {sym} a ${price:.2f}")
+
+                    # 3. CHIUSURA DI FINE GIORNATA (21:55 CET)
+                    elif is_session_end:
+                        api_call("/api/close-position", method="POST", payload={"id": pos_id, "exit_type": "MANUAL"})
+                        if target_chat and target_chat != "TUO_CHAT_ID":
+                            send_message(token, target_chat,
+                                f"🔔 <b>CHIUSURA SESSIONE WALL STREET (21:55 CET)</b>\n\n"
+                                f"🎯 <b>Titolo:</b> {sym} chiuso a ${price:.2f}\n"
+                                f"<i>Regola aurea Day Trading: nessuna posizione aperta durante la notte (no overnight hold).</i>"
+                            )
+                        print(f"[Guardian] Fine sessione: posizione chiusa per {sym}")
+
+        except Exception as e:
+            print(f"[Guardian Error] {e}")
+
+        # Controllo frequente ogni 30 secondi
+        time.sleep(30)
+
 def proactive_scanner_worker(token):
     """
-    Thread autonomo che esegue scansioni continue e SPARA NOTIFICHE PUSH
-    su Telegram all'apertura del mercato e ogni volta che individua un setup ad alta confidenza.
+    Thread autonomo che esegue scansioni continue e invia notifiche push per nuovi trade.
     """
     global active_chat_id, recent_alerts_sent
-    print("[Proactive Scanner] Avviato thread di monitoraggio autonomo.")
-    
+    print("[Proactive Scanner] Avviato thread di scansione mercato.")
     time.sleep(10)
     last_market_open_alert_day = None
 
@@ -190,25 +314,27 @@ def proactive_scanner_worker(token):
             if target_chat and target_chat != "TUO_CHAT_ID":
                 now = datetime.now()
                 current_day = now.strftime("%Y-%m-%d")
-                weekday = now.weekday() # 0 = Lunedì, 4 = Venerdì
+                weekday = now.weekday()
 
-                # Notifica di apertura Wall Street (15:30 CET nei giorni feriali)
-                if weekday < 5 and now.hour == 15 and 28 <= now.minute <= 35:
+                if is_market_open() and now.hour == 15 and 28 <= now.minute <= 36:
                     if last_market_open_alert_day != current_day:
                         last_market_open_alert_day = current_day
                         send_message(token, target_chat, 
                             "🔔 <b>WALL STREET APERTA! (15:30 CET)</b>\n"
                             "Avvio scanner automatico alla ricerca di breakout e pattern 1R.\n"
-                            "Se trovo occasioni favorevoli, riceverai subito la notifica qui!"
+                            "Se trovo occasioni favorevoli in tempo reale, riceverai subito la notifica qui!"
                         )
 
-                # Esegui scansione di mercato
+                # SE IL MERCATO USA È CHIUSO, NON INVIARE NOTIFICHE AUTOMATICHE
+                if not is_market_open():
+                    time.sleep(60)
+                    continue
+
                 api_call("/api/scan", method="POST", payload={
                     "mode": "daily",
                     "symbols": "AAPL,NVDA,MSFT,AMZN,TSLA,RACE,AZN,GOOGL,META"
                 })
 
-                # Controlla raccomandazioni
                 recs = api_call("/api/recommendations")
                 if isinstance(recs, list) and len(recs) > 0:
                     for r in recs:
@@ -219,7 +345,6 @@ def proactive_scanner_worker(token):
                         last_sent = recent_alerts_sent.get(sym, 0)
                         if conf >= 70 and (time.time() - last_sent > 7200):
                             recent_alerts_sent[sym] = time.time()
-                            
                             reasons_text = "\n".join([f"• {x}" for x in r.get("reasons", [])])
                             alert_msg = (
                                 f"🚨 <b>NUOVA OPPORTUNITÀ RILEVATA DALL'AI!</b>\n\n"
@@ -236,8 +361,6 @@ def proactive_scanner_worker(token):
                                 ]
                             }
                             send_message(token, target_chat, alert_msg, markup)
-                            print(f"[Proactive Scanner] Notifica inviata per {sym} a chat {target_chat}!")
-
         except Exception as e:
             print(f"[Proactive Scanner Error] {e}")
 
@@ -247,7 +370,7 @@ def telegram_bot_worker():
     global active_chat_id
     token, default_chat_id, _, _ = load_env()
     if not token or token == "TUO_TOKEN_TELEGRAM":
-        print("[Telegram Bot] Token non configurato nel file .env. Bot in attesa di configurazione.")
+        print("[Telegram Bot] Token non configurato nel file .env.")
         return
 
     active_chat_id = default_chat_id
@@ -257,13 +380,18 @@ def telegram_bot_worker():
         send_message(token, active_chat_id, 
             "🟢 <b>DAY TRADER BOT ONLINE SUL RASPBERRY PI</b>\n\n"
             "📍 <b>Host:</b> Raspberry Pi (192.168.1.130:8080)\n"
-            "🤖 <b>Scanner Proattivo:</b> ATTIVO (controlla il mercato ogni 5 min)\n"
-            "🔔 Ti invierò una notifica automatica appena un titolo supera il 70% di affidabilità!\n\n"
-            "Digita /help per la lista comandi o /scan per testare adesso."
+            "🤖 <b>Scanner Proattivo:</b> ATTIVO (ogni 5 min)\n"
+            "🛡️ <b>Angelo Custode Posizioni:</b> ATTIVO (Auto-Stop e Auto-Target ogni 30s)\n\n"
+            "Digita /portfolio per vedere le tue posizioni o /help per i comandi."
         )
 
+    # Avvio thread di scansione autonoma
     scanner_thread = threading.Thread(target=proactive_scanner_worker, args=(token,), daemon=True)
     scanner_thread.start()
+
+    # Avvio thread Angelo Custode (Auto-Stop & Auto-Target)
+    guardian_thread = threading.Thread(target=portfolio_guardian_worker, args=(token,), daemon=True)
+    guardian_thread.start()
 
     last_update_id = 0
 
@@ -277,7 +405,6 @@ def telegram_bot_worker():
                 for u in updates.get("result", []):
                     last_update_id = u["update_id"]
 
-                    # Click sui pulsanti inline
                     if "callback_query" in u:
                         cb = u["callback_query"]
                         cb_data = cb.get("data", "")
@@ -311,7 +438,7 @@ def telegram_bot_worker():
                             text += f"🟢 <b>Probabilità Vincita:</b> {pt:.1f}%\n"
                             text += f"🔴 <b>Probabilità Stop:</b> {ps:.1f}%\n"
                             text += f"💵 <b>Ingresso:</b> ${plan.get('entry', 0):.2f}\n"
-                            text += f"🎯 <b>Take Profit (1R):</b> ${plan.get('target', 0):.2f}\n"
+                            text += f"🎯 <b>Target 1R:</b> ${plan.get('target', 0):.2f}\n"
                             text += f"🪂 <b>Stop Loss:</b> ${plan.get('stop', 0):.2f}\n"
                             text += f"📦 <b>Azioni Consigliate:</b> {shares} azioni (max rischio: ${shares * plan.get('risk_per_share', 0):.2f})\n"
 
@@ -324,13 +451,21 @@ def telegram_bot_worker():
 
                         elif cb_data.startswith("buy_"):
                             ticker = cb_data.split("_")[1]
-                            res = api_call("/api/buy", method="POST")
+                            send_message(token, cb_chat, f"⏳ Inserimento ordine a mercato per <b>{ticker}</b>...")
+                            res = api_call("/api/buy", method="POST", payload={"symbol": ticker})
                             if res.get("success"):
-                                send_message(token, cb_chat, f"✅ <b>Ordine Eseguito!</b>\n{res.get('message')}\n\nUsa /portfolio per vedere le posizioni attive.")
+                                send_message(token, cb_chat, f"✅ <b>Ordine Eseguito!</b>\n{res.get('message')}\n\n🛡️ Stop Loss e Take Profit monitorati in automatico ogni 30s!\nUsa /portfolio per seguire la posizione.")
                             else:
                                 send_message(token, cb_chat, f"❌ <b>Errore Ordine:</b> {res.get('error')}")
 
-                    # Messaggi di testo
+                        elif cb_data.startswith("close_"):
+                            pos_id = cb_data.split("_", 1)[1]
+                            res = api_call("/api/close-position", method="POST", payload={"id": pos_id, "exit_type": "MANUAL"})
+                            if res.get("success"):
+                                send_message(token, cb_chat, f"✅ <b>Posizione Chiusa a Mercato!</b>\nCapitale e profitto riaccreditati nella cassa.")
+                            else:
+                                send_message(token, cb_chat, f"❌ <b>Errore Chiusura:</b> {res.get('error')}")
+
                     if "message" in u and "text" in u["message"]:
                         msg = u["message"]
                         chat_id = msg["chat"]["id"]
@@ -343,12 +478,12 @@ def telegram_bot_worker():
                         if text in ["/start", "/help"]:
                             welcome = (
                                 "🤖 <b>DAY TRADER BOT AI (Raspberry Pi)</b>\n\n"
-                                "Il bot monitora automaticamente il mercato azionario ogni 5 minuti e ti invia notifiche push non appena un titolo soddisfa i criteri di ingresso.\n\n"
+                                "Il bot monitora automaticamente il mercato azionario ogni 5 minuti e gestisce le tue posizioni con Stop Loss e Target automatici.\n\n"
                                 "Comandi manuali disponibili:\n"
                                 "⚡ /scan — Avvia scansione immediata su Wall Street\n"
                                 "🎯 /consigliati — I 3 titoli più promettenti in questo momento\n"
                                 "📊 /status — Saldo cassa, P&L e stato del bot\n"
-                                "💼 /portfolio — Posizioni azionarie aperte\n"
+                                "💼 /portfolio — Posizioni azionarie aperte (con prezzi live e tasto chiusura)\n"
                                 "🧪 /test — Simula una notifica di segnale di acquisto\n"
                                 "🏛️ /pelosi — Ultimi trade depositati alla Camera USA\n"
                                 "🤖 /pilot — Attiva/Disattiva pilota automatico web\n\n"
@@ -369,7 +504,8 @@ def telegram_bot_worker():
                             send_message(token, chat_id, format_recommendations(), markup)
 
                         elif text == "/portfolio":
-                            send_message(token, chat_id, format_portfolio())
+                            port_text, port_markup = format_portfolio()
+                            send_message(token, chat_id, port_text, port_markup)
 
                         elif text == "/test":
                             sample_text = (
@@ -389,6 +525,9 @@ def telegram_bot_worker():
                             send_message(token, chat_id, sample_text, markup)
 
                         elif text == "/scan":
+                            prefix = ""
+                            if not is_market_open():
+                                prefix = "🌙 <i>Nota: Wall Street è attualmente CHIUSA (Riapre oggi alle 15:30 CET).\nI titoli mostrati fanno riferimento all'ultima sessione:</i>\n\n"
                             send_message(token, chat_id, "🔍 <i>Avvio scansione su Wall Street in corso...</i>")
                             api_call("/api/scan", method="POST", payload={"mode": "daily", "symbols": "AAPL,NVDA,MSFT,AMZN,TSLA,RACE,AZN,GOOGL"})
                             markup = {
@@ -397,7 +536,7 @@ def telegram_bot_worker():
                                     [{"text": "Simula 🥉 AZN", "callback_data": "sim_AZN"}]
                                 ]
                             }
-                            send_message(token, chat_id, "✅ <b>Scansione Completata!</b>\n\n" + format_recommendations(), markup)
+                            send_message(token, chat_id, f"✅ <b>Scansione Completata!</b>\n\n{prefix}" + format_recommendations(), markup)
 
                         elif text == "/pelosi":
                             send_message(token, chat_id, format_pelosi())
