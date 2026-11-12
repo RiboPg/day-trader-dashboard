@@ -354,8 +354,25 @@ def proactive_scanner_worker(token):
                     time.sleep(60)
                     continue
 
+                try:
+                    from zoneinfo import ZoneInfo
+                    ny_now = datetime.now(ZoneInfo("America/New_York"))
+                except Exception:
+                    import datetime as dt
+                    ny_now = datetime.utcnow() - dt.timedelta(hours=5)
+
+                ny_minute = ny_now.hour * 60 + ny_now.minute
+
+                # Prima delle 09:50 ET (15:50 CET): l'opening range (09:30-09:45) è in formazione
+                # e la prima barra dopo il range chiude alle 09:50 ET (15:50 CET).
+                # NESSUN SEGNALE VIENE INVIATO PRIMA DELLE 15:50 CET!
+                if ny_minute < (9 * 60 + 50):
+                    time.sleep(30)
+                    continue
+
+                # Scansione Intraday ORB (Breakout sui prezzi live di oggi, NO prezzi vecchi di ieri)
                 api_call("/api/scan", method="POST", payload={
-                    "mode": "daily",
+                    "mode": "orb",
                     "symbols": "AAPL,NVDA,MSFT,AMZN,TSLA,RACE,AZN,GOOGL,META"
                 })
 
@@ -364,16 +381,17 @@ def proactive_scanner_worker(token):
                     for r in recs:
                         sym = r.get("symbol")
                         conf = r.get("ai_confidence", 0)
-                        price = r.get("price", 0.0)
+                        # Prezzo live effettivo di borsa di oggi
+                        price = get_live_price(sym) or r.get("price", 0.0)
                         
                         last_sent = recent_alerts_sent.get(sym, 0)
                         if conf >= 70 and (time.time() - last_sent > 7200):
                             recent_alerts_sent[sym] = time.time()
                             reasons_text = "\n".join([f"• {x}" for x in r.get("reasons", [])])
                             alert_msg = (
-                                f"🚨 <b>NUOVA OPPORTUNITÀ RILEVATA DALL'AI!</b>\n\n"
+                                f"🚨 <b>BREAKOUT REALE RILEVATO DALL'AI!</b>\n\n"
                                 f"🎯 <b>Titolo:</b> {sym}\n"
-                                f"💵 <b>Prezzo:</b> ${price:.2f}\n"
+                                f"💵 <b>Prezzo Live:</b> ${price:.2f}\n"
                                 f"🔥 <b>Affidabilità Algoritmo:</b> {conf}%\n\n"
                                 f"<b>Analisi Tecnica:</b>\n{reasons_text}\n\n"
                                 f"Vuoi acquistare questo titolo con stop automatico e target 1R?"
