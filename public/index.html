@@ -66,13 +66,17 @@
     <div class="flex items-center space-x-4">
       <div class="hidden md:flex items-center bg-dark-900 border border-slate-800 rounded-lg px-3 py-1.5 space-x-3 text-xs">
         <div>
-          <span class="text-slate-400">Cassa Libera:</span>
+          <span id="headerBrokerLabel" class="text-slate-400">Cassa:</span>
           <span id="headerCash" class="font-bold text-emerald-400 ml-1">$5,000.00</span>
         </div>
         <div class="w-px h-4 bg-slate-800"></div>
         <div>
           <span class="text-slate-400">P&L Guadagno:</span>
           <span id="headerPnl" class="font-bold text-slate-200 ml-1">$0.00</span>
+        </div>
+        <div id="alpacaBadge" class="hidden items-center space-x-1.5 text-[11px] bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-2 py-0.5 rounded font-mono font-medium">
+          <span class="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
+          <span>Alpaca Paper $100k</span>
         </div>
       </div>
 
@@ -474,6 +478,12 @@
         <h3 class="text-base font-bold text-white">Impostazioni Budget & Rischio</h3>
         <button onclick="closeConfigModal()" class="text-slate-400 hover:text-white"><i data-lucide="x" class="w-5 h-5"></i></button>
       </div>
+
+      <!-- Alpaca Connection Status Box -->
+      <div id="alpacaModalStatus" class="p-3 rounded-xl border text-xs">
+        <!-- Injected via JavaScript -->
+      </div>
+
       <div class="space-y-3 text-xs">
         <div>
           <label class="block text-slate-400 mb-1 font-semibold">Budget Virtuale di Trading ($):</label>
@@ -498,6 +508,7 @@
   <script>
     let currentWatchlist = [];
     let currentPortfolio = { cash: 5000, positions: [], closed: [], total_profit_loss: 0 };
+    let currentAlpaca = null;
     let fanChartInstance = null;
 
     function onTickerSelectChange(val) {
@@ -534,6 +545,8 @@
         const res = await fetch('/api/status');
         const data = await res.json();
         
+        currentAlpaca = data.alpaca || null;
+
         if (data.config) {
           document.getElementById('inputCfgBudget').value = data.config.budget || 5000;
           document.getElementById('inputCfgMaxLoss').value = data.config.max_loss_per_trade_usd || 50;
@@ -542,8 +555,10 @@
 
         if (data.portfolio) {
           currentPortfolio = data.portfolio;
-          updatePortfolioHeader();
         }
+
+        updatePortfolioHeader();
+        updateAlpacaModalUI();
 
         updateAutoPilotUI(data.auto_pilot);
 
@@ -564,12 +579,65 @@
     }
 
     function updatePortfolioHeader() {
-      document.getElementById('headerCash').textContent = '$' + Number(currentPortfolio.cash).toLocaleString(undefined, {minimumFractionDigits: 2});
       const pnl = currentPortfolio.total_profit_loss || 0;
       const pnlElem = document.getElementById('headerPnl');
       pnlElem.textContent = (pnl >= 0 ? '+$' : '-$') + Math.abs(pnl).toFixed(2);
       pnlElem.className = pnl > 0 ? "font-bold text-emerald-400 ml-1" : (pnl < 0 ? "font-bold text-rose-400 ml-1" : "font-bold text-slate-200 ml-1");
       document.getElementById('badgePositionsCount').textContent = (currentPortfolio.positions || []).length;
+
+      const alpBadge = document.getElementById('alpacaBadge');
+      const label = document.getElementById('headerBrokerLabel');
+      const cashElem = document.getElementById('headerCash');
+
+      if (currentAlpaca && currentAlpaca.connected) {
+        label.textContent = "Alpaca Cash:";
+        cashElem.textContent = '$' + Number(currentAlpaca.cash).toLocaleString(undefined, {minimumFractionDigits: 2});
+        alpBadge.classList.remove('hidden');
+        alpBadge.classList.add('inline-flex');
+      } else {
+        label.textContent = "Cassa Libera:";
+        cashElem.textContent = '$' + Number(currentPortfolio.cash).toLocaleString(undefined, {minimumFractionDigits: 2});
+        alpBadge.classList.add('hidden');
+        alpBadge.classList.remove('inline-flex');
+      }
+    }
+
+    function updateAlpacaModalUI() {
+      const box = document.getElementById('alpacaModalStatus');
+      if (!box) return;
+
+      if (currentAlpaca && currentAlpaca.connected) {
+        box.className = "p-3 rounded-xl border bg-emerald-950/30 border-emerald-800/60 text-xs text-slate-300 space-y-1.5";
+        box.innerHTML = `
+          <div class="flex items-center justify-between">
+            <span class="font-bold text-emerald-400 flex items-center space-x-1.5">
+              <span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+              <span>Alpaca Paper Trading Connesso</span>
+            </span>
+            <span class="text-[10px] font-mono text-emerald-300 font-semibold">ONLINE</span>
+          </div>
+          <div class="text-[11px] text-slate-400">
+            Conto: <span class="font-mono text-white">#${currentAlpaca.account_number || 'PAPER'}</span> · 
+            Buying Power: <span class="font-mono text-white">$${Number(currentAlpaca.buying_power).toLocaleString(undefined, {minimumFractionDigits: 2})}</span>
+          </div>
+          <div class="text-[11px] text-slate-400">
+            Equity Totale: <span class="font-bold text-emerald-400 font-mono">$${Number(currentAlpaca.portfolio_value).toLocaleString(undefined, {minimumFractionDigits: 2})}</span>
+          </div>
+        `;
+      } else {
+        const errorMsg = (currentAlpaca && currentAlpaca.error) ? `<div class="text-[10px] text-rose-400 font-mono mt-1">${currentAlpaca.error}</div>` : '';
+        box.className = "p-3 rounded-xl border bg-dark-900 border-slate-700 text-xs text-slate-400 space-y-1";
+        box.innerHTML = `
+          <div class="flex items-center justify-between">
+            <span class="font-bold text-amber-400">Simulazione Virtuale Locale</span>
+            <span class="text-[10px] font-mono text-amber-400/80 bg-amber-400/10 px-1.5 py-0.5 rounded">LOCAL</span>
+          </div>
+          <p class="text-[11px] text-slate-400">
+            Chiavi Alpaca non rilevate nel file <code class="text-white font-mono bg-dark-800 px-1 rounded">.env</code> del Raspberry Pi. Il bot sta usando il file locale <code class="text-white font-mono bg-dark-800 px-1 rounded">portfolio.json</code>.
+          </p>
+          ${errorMsg}
+        `;
+      }
     }
 
     // Render Algorithmic Recommendations
