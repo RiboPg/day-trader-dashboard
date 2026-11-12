@@ -340,34 +340,53 @@ class TraderAPIHandler(http.server.SimpleHTTPRequestHandler):
             })
         elif path == "/api/buy":
             # Execute Paper Buy Order into Portfolio
-            plan = get_plan()
-            orders = get_orders()
-            if not plan or not orders:
-                self.send_json_response({"success": False, "error": "Nessun piano o ordine pronto per l'acquisto"}, 400)
+            target_symbol = payload.get("symbol", "").upper()
+            plan = get_plan() or {}
+            orders_data = get_orders()
+            orders_list = orders_data.get("orders", []) if isinstance(orders_data, dict) else (orders_data if isinstance(orders_data, list) else [])
+            
+            # Se target_symbol è specificato e diverso dal piano corrente, prepara il piano al volo:
+            if target_symbol and (not plan or plan.get("symbol") != target_symbol):
+                entry_script = str(SKILLS_DIR / "trader-entry" / "entry.py")
+                run_skill_command([sys.executable, entry_script, "check", target_symbol, "--write"])
+                exit_script = str(SKILLS_DIR / "trader-exit" / "exit.py")
+                run_skill_command([sys.executable, exit_script, "plan", "--stop", "or-mid", "--target", "1R", "--write"])
+                size_script = str(SKILLS_DIR / "trader-budget" / "size.py")
+                run_skill_command([sys.executable, size_script, "--write"])
+                plan = get_plan() or {}
+                orders_data = get_orders()
+                orders_list = orders_data.get("orders", []) if isinstance(orders_data, dict) else []
+
+            if not plan:
+                self.send_json_response({"success": False, "error": f"Nessun piano disponibile per {target_symbol or 'il titolo'}"}, 400)
                 return
 
-            order = orders[0]
-            shares = order.get("qty", 10)
-            entry_price = plan.get("entry", 350.0)
+            order = orders_list[0] if orders_list else {}
+            shares = int(order.get("qty", 10))
+            entry_price = float(plan.get("entry", 100.0))
             cost = shares * entry_price
+            risk_val = float(plan.get("risk_per_share", plan.get("risk", 1.0)))
 
             port = get_portfolio()
             if port["cash"] < cost:
                 self.send_json_response({"success": False, "error": f"Fondi insufficienti: servono ${cost:.2f}, disponibili ${port['cash']:.2f}"}, 400)
                 return
 
-            # Deduct cash & add position
             port["cash"] -= cost
+            sym = plan.get("symbol", target_symbol or "TICKER")
+            target_pr = float(plan.get("target", entry_price * 1.01))
+            stop_pr = float(plan.get("stop", entry_price * 0.99))
+            
             position = {
                 "id": f"pos-{int(time.time())}",
-                "symbol": plan.get("symbol", "AAPL"),
+                "symbol": sym,
                 "shares": shares,
                 "entry_price": entry_price,
                 "total_invested": cost,
-                "target_price": plan.get("target"),
-                "stop_price": plan.get("stop"),
-                "max_loss": shares * plan.get("risk", 0),
-                "potential_gain": shares * plan.get("risk", 0),
+                "target_price": target_pr,
+                "stop_price": stop_pr,
+                "max_loss": shares * risk_val,
+                "potential_gain": shares * risk_val,
                 "status": "OPEN",
                 "opened_at": time.strftime("%Y-%m-%d %H:%M:%S")
             }
