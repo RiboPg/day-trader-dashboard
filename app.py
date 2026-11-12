@@ -13,6 +13,7 @@ import threading
 import time
 import urllib.parse
 import base64
+from datetime import datetime
 from pathlib import Path
 
 try:
@@ -361,105 +362,116 @@ class TraderAPIHandler(http.server.SimpleHTTPRequestHandler):
             })
         elif path == "/api/buy":
             # Execute Paper Buy Order into Portfolio
-            target_symbol = payload.get("symbol", "").upper()
-
-            # 1. BLOCCO DI SICUREZZA ORARIO (Regola Day Trading: 15:45 - 21:30 CET)
             try:
-                from zoneinfo import ZoneInfo
-                ny_now = datetime.now(ZoneInfo("America/New_York"))
-            except Exception:
-                import datetime as dt
-                ny_now = datetime.utcnow() - dt.timedelta(hours=5)
+                target_symbol = payload.get("symbol", "").upper()
 
-            minute_of_day = ny_now.hour * 60 + ny_now.minute
-            market_entry_start = 9 * 60 + 45  # 09:45 ET (15:45 CET)
-            market_entry_end = 15 * 60 + 30   # 15:30 ET (21:30 CET)
+                # 1. BLOCCO DI SICUREZZA ORARIO (Regola Day Trading: 15:45 - 21:30 CET)
+                try:
+                    from zoneinfo import ZoneInfo
+                    ny_now = datetime.now(ZoneInfo("America/New_York"))
+                except Exception:
+                    import datetime as dt
+                    ny_now = dt.datetime.utcnow() - dt.timedelta(hours=5)
 
-            if not (market_entry_start <= minute_of_day <= market_entry_end) or ny_now.weekday() >= 5:
+                minute_of_day = ny_now.hour * 60 + ny_now.minute
+                market_entry_start = 9 * 60 + 45  # 09:45 ET (15:45 CET)
+                market_entry_end = 15 * 60 + 30   # 15:30 ET (21:30 CET)
+
+                if not (market_entry_start <= minute_of_day <= market_entry_end) or ny_now.weekday() >= 5:
+                    self.send_json_response({
+                        "success": False,
+                        "error": "⛔ INGRESSO BLOCCATO: La regola ferrea del Day Trading vieta acquisti prima delle 15:45 CET o dopo le 21:30 CET. Riprova durante la sessione valida!"
+                    }, 400)
+                    return
+
+                # 2. Genera o valida il piano in tempo reale sul mercato corrente
+                entry_script = str(SKILLS_DIR / "trader-entry" / "entry.py")
+                code, e_out, e_err = run_skill_command([sys.executable, entry_script, "check", target_symbol, "--write"])
+                if code != 0:
+                    first_line = e_out.splitlines()[0] if e_out else "Range in formazione o nessun breakout."
+                    self.send_json_response({
+                        "success": False,
+                        "error": f"⚠️ {target_symbol}: Nessun breakout confermato sul mercato live. ({first_line})"
+                    }, 400)
+                    return
+
+                exit_script = str(SKILLS_DIR / "trader-exit" / "exit.py")
+                run_skill_command([sys.executable, exit_script, "plan", "--stop", "or-mid", "--target", "1R", "--write"])
+                size_script = str(SKILLS_DIR / "trader-budget" / "size.py")
+                run_skill_command([sys.executable, size_script, "--write"])
+
+                plan = get_plan() or {}
+                orders_data = get_orders()
+                orders_list = orders_data.get("orders", []) if isinstance(orders_data, dict) else []
+
+                if not plan:
+                    self.send_json_response({"success": False, "error": f"Nessun piano disponibile per {target_symbol or 'il titolo'}"}, 400)
+                    return
+
+                order = orders_list[0] if orders_list else {}
+                shares = int(order.get("qty", 10))
+                entry_price = float(plan.get("entry", 100.0))
+                cost = shares * entry_price
+                risk_val = float(plan.get("risk_per_share", plan.get("risk", 1.0)))
+
+                port = get_portfolio()
+                # Se Alpaca è attivo, usiamo il buying power di Alpaca
+                if alpaca and alpaca.is_configured:
+                    acc = alpaca.get_account()
+                    alp_cash = float(acc.get("cash", 100000)) if isinstance(acc, dict) and "cash" in acc else port["cash"]
+                    if alp_cash < cost:
+                        self.send_json_response({"success": False, "error": f"Fondi insufficienti su Alpaca: servono ${cost:.2f}, disponibili ${alp_cash:.2f}"}, 400)
+                        return
+                else:
+                    if port["cash"] < cost:
+                        self.send_json_response({"success": False, "error": f"Fondi insufficienti: servono ${cost:.2f}, disponibili ${port['cash']:.2f}"}, 400)
+                        return
+
+                port["cash"] -= cost
+                sym = plan.get("symbol", target_symbol or "TICKER")
+                target_pr = float(plan.get("target", entry_price * 1.01))
+                stop_pr = float(plan.get("stop", entry_price * 0.99))
+                
+                # Invia ordine Bracket direttamente ad Alpaca se configurato
+                alpaca_note = ""
+                if alpaca and alpaca.is_configured:
+                    alp_res = alpaca.place_bracket_order(
+                        symbol=sym,
+                        qty=shares,
+                        target_price=target_pr,
+                        stop_price=stop_pr
+                    )
+                    if isinstance(alp_res, dict) and "id" in alp_res:
+                        alpaca_note = f" (Inviato ad Alpaca Paper Trading - ID: {alp_res['id'][:8]}...)"
+                    elif isinstance(alp_res, dict) and "error" in alp_res:
+                        alpaca_note = f" (Nota Alpaca: {alp_res.get('error')})"
+
+                position = {
+                    "id": f"pos-{int(time.time())}",
+                    "symbol": sym,
+                    "shares": shares,
+                    "entry_price": entry_price,
+                    "total_invested": cost,
+                    "target_price": target_pr,
+                    "stop_price": stop_pr,
+                    "max_loss": shares * risk_val,
+                    "potential_gain": shares * risk_val,
+                    "status": "OPEN",
+                    "opened_at": time.strftime("%Y-%m-%d %H:%M:%S")
+                }
+                if alpaca and alpaca.is_configured and isinstance(alp_res, dict) and "id" in alp_res:
+                    position["alpaca_order_id"] = alp_res.get("id")
+                port["positions"].append(position)
+                save_portfolio(port)
+
                 self.send_json_response({
-                    "success": False,
-                    "error": "⛔ INGRESSO BLOCCATO: La regola ferrea del Day Trading vieta acquisti prima delle 15:45 CET (i primi 15 minuti servono a definire il range) o dopo le 21:30 CET. Riprova dopo le 15:45!"
-                }, 400)
-                return
-
-            # 2. Genera o valida il piano in tempo reale sul mercato corrente
-            entry_script = str(SKILLS_DIR / "trader-entry" / "entry.py")
-            code, e_out, e_err = run_skill_command([sys.executable, entry_script, "check", target_symbol, "--write"])
-            if code != 0:
-                first_line = e_out.splitlines()[0] if e_out else "Range in formazione o nessun breakout."
-                self.send_json_response({
-                    "success": False,
-                    "error": f"⚠️ {target_symbol}: Nessun breakout confermato sul mercato live. ({first_line})"
-                }, 400)
-                return
-
-            exit_script = str(SKILLS_DIR / "trader-exit" / "exit.py")
-            run_skill_command([sys.executable, exit_script, "plan", "--stop", "or-mid", "--target", "1R", "--write"])
-            size_script = str(SKILLS_DIR / "trader-budget" / "size.py")
-            run_skill_command([sys.executable, size_script, "--write"])
-
-            plan = get_plan() or {}
-            orders_data = get_orders()
-            orders_list = orders_data.get("orders", []) if isinstance(orders_data, dict) else []
-
-            if not plan:
-                self.send_json_response({"success": False, "error": f"Nessun piano disponibile per {target_symbol or 'il titolo'}"}, 400)
-                return
-
-            order = orders_list[0] if orders_list else {}
-            shares = int(order.get("qty", 10))
-            entry_price = float(plan.get("entry", 100.0))
-            cost = shares * entry_price
-            risk_val = float(plan.get("risk_per_share", plan.get("risk", 1.0)))
-
-            port = get_portfolio()
-            if port["cash"] < cost:
-                self.send_json_response({"success": False, "error": f"Fondi insufficienti: servono ${cost:.2f}, disponibili ${port['cash']:.2f}"}, 400)
-                return
-
-            port["cash"] -= cost
-            sym = plan.get("symbol", target_symbol or "TICKER")
-            target_pr = float(plan.get("target", entry_price * 1.01))
-            stop_pr = float(plan.get("stop", entry_price * 0.99))
-            
-            # Invia ordine Bracket direttamente ad Alpaca se configurato
-            alpaca_note = ""
-            if alpaca and alpaca.is_configured:
-                alp_res = alpaca.place_bracket_order(
-                    symbol=sym,
-                    qty=shares,
-                    target_price=target_pr,
-                    stop_price=stop_pr
-                )
-                if isinstance(alp_res, dict) and "id" in alp_res:
-                    alpaca_note = f" (Inviato ad Alpaca Paper Trading - ID: {alp_res['id'][:8]}...)"
-                elif isinstance(alp_res, dict) and "error" in alp_res:
-                    alpaca_note = f" (Nota Alpaca: {alp_res.get('error')})"
-
-            position = {
-                "id": f"pos-{int(time.time())}",
-                "symbol": sym,
-                "shares": shares,
-                "entry_price": entry_price,
-                "total_invested": cost,
-                "target_price": target_pr,
-                "stop_price": stop_pr,
-                "max_loss": shares * risk_val,
-                "potential_gain": shares * risk_val,
-                "status": "OPEN",
-                "opened_at": time.strftime("%Y-%m-%d %H:%M:%S")
-            }
-            if alpaca and alpaca.is_configured and isinstance(alp_res, dict) and "id" in alp_res:
-                position["alpaca_order_id"] = alp_res.get("id")
-            port["positions"].append(position)
-            save_portfolio(port)
-
-            self.send_json_response({
-                "success": True,
-                "message": f"Acquistate con successo {shares} azioni di {position['symbol']} a ${entry_price:.2f}!{alpaca_note}",
-                "position": position,
-                "portfolio": port
-            })
+                    "success": True,
+                    "message": f"Acquistate con successo {shares} azioni di {position['symbol']} a ${entry_price:.2f}!{alpaca_note}",
+                    "position": position,
+                    "portfolio": port
+                })
+            except Exception as e:
+                self.send_json_response({"success": False, "error": f"Errore esecuzione ordine: {str(e)}"}, 500)
         elif path == "/api/close-position":
             pos_id = payload.get("id")
             exit_type = payload.get("exit_type", "TARGET") # TARGET, STOP, or MANUAL
