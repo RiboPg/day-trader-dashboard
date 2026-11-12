@@ -181,24 +181,48 @@ def format_recommendations():
 def format_portfolio():
     port = api_call("/api/portfolio")
     positions = port.get("positions", [])
-    if not positions:
-        return "💼 <b>Il tuo portafoglio è vuoto.</b>\nNessuna posizione aperta al momento.", None
-    
-    text = f"💼 <b>POSIZIONI APERTE ({len(positions)})</b>\n\n"
+    closed_trades = port.get("closed", [])
+    total_pnl = port.get("total_profit_loss", 0.0)
+
+    pnl_icon = "🟢" if total_pnl >= 0 else "🔴"
+    pnl_sign = "+" if total_pnl >= 0 else ""
+
+    text = f"📊 <b>PORTAFOGLIO & STORICO OPERAZIONI</b>\n"
+    text += f"💰 <b>Cassa:</b> ${port.get('cash', 0):,.2f} | 📈 <b>P&L Totale:</b> {pnl_icon} {pnl_sign}${total_pnl:.2f}\n\n"
+
     buttons = []
-    for p in positions:
-        sym = p.get("symbol", "TITOLO")
-        pos_id = p.get("id")
-        cur_pr = get_live_price(sym)
-        cur_str = f" (${cur_pr:.2f})" if cur_pr else ""
-        
-        text += f"🔹 <b>{sym}</b>{cur_str}\n"
-        text += f"   • Azioni: {p.get('shares')} a carico ${p.get('entry_price', 0):.2f}\n"
-        text += f"   • Investiti: ${p.get('total_invested', 0):.2f}\n"
-        text += f"   • 🎯 Target (1R): ${p.get('target_price', 0):.2f} (+${p.get('potential_gain', 0):.2f})\n"
-        text += f"   • 🪂 Stop Loss: ${p.get('stop_price', 0):.2f} (-${p.get('max_loss', 0):.2f})\n\n"
-        buttons.append([{"text": f"🛑 Chiudi {sym} a Mercato", "callback_data": f"close_{pos_id}"}])
-        
+    # 1. Sezione Posizioni Aperte
+    text += f"💼 <b>POSIZIONI APERTE ({len(positions)})</b>\n"
+    if not positions:
+        text += "<i>Nessuna posizione aperta al momento.</i>\n\n"
+    else:
+        for p in positions:
+            sym = p.get("symbol", "TITOLO")
+            pos_id = p.get("id")
+            cur_pr = get_live_price(sym)
+            cur_str = f" (Live: <b>${cur_pr:.2f}</b>)" if cur_pr else ""
+            
+            text += f"🔹 <b>{sym}</b>{cur_str}\n"
+            text += f"   • Azioni: {p.get('shares')} a carico ${p.get('entry_price', 0):.2f}\n"
+            text += f"   • Investiti: ${p.get('total_invested', 0):.2f}\n"
+            text += f"   • 🎯 Target: ${p.get('target_price', 0):.2f} (+${p.get('potential_gain', 0):.2f})\n"
+            text += f"   • 🪂 Stop Loss: ${p.get('stop_price', 0):.2f} (-${p.get('max_loss', 0):.2f})\n\n"
+            buttons.append([{"text": f"🛑 Chiudi {sym} a Mercato", "callback_data": f"close_{pos_id}"}])
+
+    # 2. Sezione Storico Operazioni Concluse
+    text += f"📜 <b>STORICO OPERAZIONI CHIUSE ({len(closed_trades)})</b>\n"
+    if not closed_trades:
+        text += "<i>Nessuna operazione conclusa finora.</i>\n"
+    else:
+        # Mostra le ultime 5 operazioni chiuse
+        for tr in closed_trades[-5:]:
+            sym = tr.get("symbol", "TITOLO")
+            pnl = tr.get("pnl", 0.0)
+            p_icon = "🟢" if pnl >= 0 else "🔴"
+            p_sign = "+" if pnl >= 0 else ""
+            c_date = tr.get("closed_at", "")[:16] # YYYY-MM-DD HH:MM
+            text += f"{p_icon} <b>{sym}</b>: <b>{p_sign}${pnl:.2f}</b> ({tr.get('shares')}x a ${tr.get('entry_price', 0):.2f} • {c_date})\n"
+
     markup = {"inline_keyboard": buttons} if buttons else None
     return text, markup
 
@@ -483,7 +507,8 @@ def telegram_bot_worker():
                                 "⚡ /scan — Avvia scansione immediata su Wall Street\n"
                                 "🎯 /consigliati — I 3 titoli più promettenti in questo momento\n"
                                 "📊 /status — Saldo cassa, P&L e stato del bot\n"
-                                "💼 /portfolio — Posizioni azionarie aperte (con prezzi live e tasto chiusura)\n"
+                                "💼 /portfolio — Posizioni aperte & storico operazioni chiuse\n"
+                                "📜 /storico — Registro dettagliato trade chiusi e guadagni\n"
                                 "🧪 /test — Simula una notifica di segnale di acquisto\n"
                                 "🏛️ /pelosi — Ultimi trade depositati alla Camera USA\n"
                                 "🤖 /pilot — Attiva/Disattiva pilota automatico web\n\n"
@@ -503,7 +528,7 @@ def telegram_bot_worker():
                             }
                             send_message(token, chat_id, format_recommendations(), markup)
 
-                        elif text == "/portfolio":
+                        elif text in ["/portfolio", "/storico"]:
                             port_text, port_markup = format_portfolio()
                             send_message(token, chat_id, port_text, port_markup)
 

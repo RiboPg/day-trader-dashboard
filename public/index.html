@@ -946,11 +946,8 @@
             </button>
           </div>
         `;
-        lucide.createIcons();
-        return;
-      }
-
-      container.innerHTML = positions.map(pos => `
+      } else {
+        container.innerHTML = positions.map(pos => `
         <div class="glass p-6 rounded-2xl border border-emerald-500/30 flex flex-col md:flex-row md:items-center justify-between gap-4">
           <div class="space-y-1">
             <div class="flex items-center space-x-2">
@@ -978,6 +975,7 @@
           </div>
         </div>
       `).join('');
+      }
 
       // Render Closed Trades
       const closedTbody = document.getElementById('portfolioClosedBody');
