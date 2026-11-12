@@ -151,13 +151,20 @@ def format_status():
     pos_count = len(port.get("positions", []))
     auto = "🟢 ATTIVO" if status.get("auto_pilot") else "⚪ OFF"
     market_str = "🟢 APERTO" if is_market_open() else "🔴 CHIUSO (Apre alle 15:30 CET)"
+    alp_info = status.get("alpaca")
 
     pnl_icon = "🟢" if pnl >= 0 else "🔴"
     pnl_sign = "+" if pnl >= 0 else ""
 
     text = f"📊 <b>DAY TRADER STATUS (Raspberry Pi)</b>\n\n"
     text += f"🏛️ <b>Mercato Wall Street:</b> {market_str}\n"
-    text += f"💰 <b>Cassa Libera:</b> ${cash:,.2f}\n"
+    if alp_info and alp_info.get("connected"):
+        text += f"🏦 <b>Broker:</b> Alpaca Paper Trading 🟢\n"
+        text += f"💵 <b>Saldo Alpaca:</b> ${alp_info.get('portfolio_value', 0):,.2f} (Buying Power: ${alp_info.get('buying_power', 0):,.2f})\n"
+    else:
+        text += f"🏦 <b>Broker:</b> Simulatore Locale (Paper)\n"
+        text += f"💰 <b>Cassa Libera:</b> ${cash:,.2f}\n"
+
     text += f"📈 <b>P&L Totale:</b> {pnl_icon} {pnl_sign}${pnl:.2f}\n"
     text += f"💼 <b>Posizioni Aperte:</b> {pos_count}\n"
     text += f"🤖 <b>Pilota Automatico:</b> {auto}\n"

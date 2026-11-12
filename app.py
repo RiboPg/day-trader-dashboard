@@ -15,6 +15,12 @@ import urllib.parse
 import base64
 from pathlib import Path
 
+try:
+    from alpaca_client import AlpacaClient
+    alpaca = AlpacaClient()
+except Exception:
+    alpaca = None
+
 BASE_DIR = Path(__file__).resolve().parent
 TRADER_DIR = BASE_DIR / "trader"
 # Self-contained local skills folder fallback to global
@@ -222,8 +228,23 @@ class TraderAPIHandler(http.server.SimpleHTTPRequestHandler):
         query = urllib.parse.parse_qs(url.query)
 
         if path == "/api/status":
+            alpaca_status = None
+            if alpaca and alpaca.is_configured:
+                acc = alpaca.get_account()
+                if isinstance(acc, dict) and "error" not in acc:
+                    alpaca_status = {
+                        "connected": True,
+                        "cash": float(acc.get("cash", 0)),
+                        "buying_power": float(acc.get("buying_power", 0)),
+                        "portfolio_value": float(acc.get("portfolio_value", 0)),
+                        "account_number": acc.get("account_number")
+                    }
+                else:
+                    alpaca_status = {"connected": False, "error": acc.get("error") if isinstance(acc, dict) else "errore"}
+
             self.send_json_response({
                 "status": "online",
+                "alpaca": alpaca_status,
                 "config": get_config(),
                 "watchlist": get_watchlist(),
                 "recommendations": compute_recommendations(),
@@ -401,6 +422,20 @@ class TraderAPIHandler(http.server.SimpleHTTPRequestHandler):
             target_pr = float(plan.get("target", entry_price * 1.01))
             stop_pr = float(plan.get("stop", entry_price * 0.99))
             
+            # Invia ordine Bracket direttamente ad Alpaca se configurato
+            alpaca_note = ""
+            if alpaca and alpaca.is_configured:
+                alp_res = alpaca.place_bracket_order(
+                    symbol=sym,
+                    qty=shares,
+                    target_price=target_pr,
+                    stop_price=stop_pr
+                )
+                if isinstance(alp_res, dict) and "id" in alp_res:
+                    alpaca_note = f" (Inviato ad Alpaca Paper Trading - ID: {alp_res['id'][:8]}...)"
+                elif isinstance(alp_res, dict) and "error" in alp_res:
+                    alpaca_note = f" (Nota Alpaca: {alp_res.get('error')})"
+
             position = {
                 "id": f"pos-{int(time.time())}",
                 "symbol": sym,
@@ -414,12 +449,14 @@ class TraderAPIHandler(http.server.SimpleHTTPRequestHandler):
                 "status": "OPEN",
                 "opened_at": time.strftime("%Y-%m-%d %H:%M:%S")
             }
+            if alpaca and alpaca.is_configured and isinstance(alp_res, dict) and "id" in alp_res:
+                position["alpaca_order_id"] = alp_res.get("id")
             port["positions"].append(position)
             save_portfolio(port)
 
             self.send_json_response({
                 "success": True,
-                "message": f"Acquistate con successo {shares} azioni di {position['symbol']} a ${entry_price:.2f}!",
+                "message": f"Acquistate con successo {shares} azioni di {position['symbol']} a ${entry_price:.2f}!{alpaca_note}",
                 "position": position,
                 "portfolio": port
             })
@@ -432,6 +469,10 @@ class TraderAPIHandler(http.server.SimpleHTTPRequestHandler):
             if not pos:
                 self.send_json_response({"success": False, "error": "Posizione non trovata"}, 404)
                 return
+
+            # Chiudi posizione su Alpaca se configurato
+            if alpaca and alpaca.is_configured:
+                alpaca.close_position(pos.get("symbol", ""))
 
             port["positions"] = [p for p in port["positions"] if p["id"] != pos_id]
             
