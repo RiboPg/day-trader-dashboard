@@ -341,21 +341,45 @@ class TraderAPIHandler(http.server.SimpleHTTPRequestHandler):
         elif path == "/api/buy":
             # Execute Paper Buy Order into Portfolio
             target_symbol = payload.get("symbol", "").upper()
+
+            # 1. BLOCCO DI SICUREZZA ORARIO (Regola Day Trading: 15:45 - 21:30 CET)
+            try:
+                from zoneinfo import ZoneInfo
+                ny_now = datetime.now(ZoneInfo("America/New_York"))
+            except Exception:
+                import datetime as dt
+                ny_now = datetime.utcnow() - dt.timedelta(hours=5)
+
+            minute_of_day = ny_now.hour * 60 + ny_now.minute
+            market_entry_start = 9 * 60 + 45  # 09:45 ET (15:45 CET)
+            market_entry_end = 15 * 60 + 30   # 15:30 ET (21:30 CET)
+
+            if not (market_entry_start <= minute_of_day <= market_entry_end) or ny_now.weekday() >= 5:
+                self.send_json_response({
+                    "success": False,
+                    "error": "⛔ INGRESSO BLOCCATO: La regola ferrea del Day Trading vieta acquisti prima delle 15:45 CET (i primi 15 minuti servono a definire il range) o dopo le 21:30 CET. Riprova dopo le 15:45!"
+                }, 400)
+                return
+
+            # 2. Genera o valida il piano in tempo reale sul mercato corrente
+            entry_script = str(SKILLS_DIR / "trader-entry" / "entry.py")
+            code, e_out, e_err = run_skill_command([sys.executable, entry_script, "check", target_symbol, "--write"])
+            if code != 0:
+                first_line = e_out.splitlines()[0] if e_out else "Range in formazione o nessun breakout."
+                self.send_json_response({
+                    "success": False,
+                    "error": f"⚠️ {target_symbol}: Nessun breakout confermato sul mercato live. ({first_line})"
+                }, 400)
+                return
+
+            exit_script = str(SKILLS_DIR / "trader-exit" / "exit.py")
+            run_skill_command([sys.executable, exit_script, "plan", "--stop", "or-mid", "--target", "1R", "--write"])
+            size_script = str(SKILLS_DIR / "trader-budget" / "size.py")
+            run_skill_command([sys.executable, size_script, "--write"])
+
             plan = get_plan() or {}
             orders_data = get_orders()
-            orders_list = orders_data.get("orders", []) if isinstance(orders_data, dict) else (orders_data if isinstance(orders_data, list) else [])
-            
-            # Se target_symbol è specificato e diverso dal piano corrente, prepara il piano al volo:
-            if target_symbol and (not plan or plan.get("symbol") != target_symbol):
-                entry_script = str(SKILLS_DIR / "trader-entry" / "entry.py")
-                run_skill_command([sys.executable, entry_script, "check", target_symbol, "--write"])
-                exit_script = str(SKILLS_DIR / "trader-exit" / "exit.py")
-                run_skill_command([sys.executable, exit_script, "plan", "--stop", "or-mid", "--target", "1R", "--write"])
-                size_script = str(SKILLS_DIR / "trader-budget" / "size.py")
-                run_skill_command([sys.executable, size_script, "--write"])
-                plan = get_plan() or {}
-                orders_data = get_orders()
-                orders_list = orders_data.get("orders", []) if isinstance(orders_data, dict) else []
+            orders_list = orders_data.get("orders", []) if isinstance(orders_data, dict) else []
 
             if not plan:
                 self.send_json_response({"success": False, "error": f"Nessun piano disponibile per {target_symbol or 'il titolo'}"}, 400)
