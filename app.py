@@ -233,12 +233,19 @@ class TraderAPIHandler(http.server.SimpleHTTPRequestHandler):
             if alpaca and alpaca.is_configured:
                 acc = alpaca.get_account()
                 if isinstance(acc, dict) and "error" not in acc:
+                    pos_list = alpaca.get_positions()
+                    eq = float(acc.get("portfolio_value", acc.get("equity", 0)))
+                    last_eq = float(acc.get("last_equity", eq))
+                    day_pnl = round(eq - last_eq, 2)
                     alpaca_status = {
                         "connected": True,
                         "cash": float(acc.get("cash", 0)),
                         "buying_power": float(acc.get("buying_power", 0)),
-                        "portfolio_value": float(acc.get("portfolio_value", 0)),
-                        "account_number": acc.get("account_number")
+                        "portfolio_value": eq,
+                        "last_equity": last_eq,
+                        "day_pnl": day_pnl,
+                        "account_number": acc.get("account_number"),
+                        "positions": pos_list if isinstance(pos_list, list) else []
                     }
                 else:
                     alpaca_status = {"connected": False, "error": acc.get("error") if isinstance(acc, dict) else "errore"}
@@ -474,9 +481,17 @@ class TraderAPIHandler(http.server.SimpleHTTPRequestHandler):
                 self.send_json_response({"success": False, "error": f"Errore esecuzione ordine: {str(e)}"}, 500)
         elif path == "/api/close-position":
             pos_id = payload.get("id")
+            symbol = payload.get("symbol")
             exit_type = payload.get("exit_type", "TARGET") # TARGET, STOP, or MANUAL
             port = get_portfolio()
             
+            if symbol and alpaca and alpaca.is_configured:
+                alpaca.close_position(symbol)
+                port["positions"] = [p for p in port["positions"] if p.get("symbol") != symbol]
+                save_portfolio(port)
+                self.send_json_response({"success": True, "message": f"Posizione {symbol} chiusa su Alpaca"})
+                return
+
             pos = next((p for p in port["positions"] if p["id"] == pos_id), None)
             if not pos:
                 self.send_json_response({"success": False, "error": "Posizione non trovata"}, 404)

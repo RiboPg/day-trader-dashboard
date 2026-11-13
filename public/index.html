@@ -579,26 +579,33 @@
     }
 
     function updatePortfolioHeader() {
-      const pnl = currentPortfolio.total_profit_loss || 0;
-      const pnlElem = document.getElementById('headerPnl');
-      pnlElem.textContent = (pnl >= 0 ? '+$' : '-$') + Math.abs(pnl).toFixed(2);
-      pnlElem.className = pnl > 0 ? "font-bold text-emerald-400 ml-1" : (pnl < 0 ? "font-bold text-rose-400 ml-1" : "font-bold text-slate-200 ml-1");
-      document.getElementById('badgePositionsCount').textContent = (currentPortfolio.positions || []).length;
-
       const alpBadge = document.getElementById('alpacaBadge');
       const label = document.getElementById('headerBrokerLabel');
       const cashElem = document.getElementById('headerCash');
+      const pnlElem = document.getElementById('headerPnl');
 
       if (currentAlpaca && currentAlpaca.connected) {
         label.textContent = "Alpaca Cash:";
         cashElem.textContent = '$' + Number(currentAlpaca.cash).toLocaleString(undefined, {minimumFractionDigits: 2});
         alpBadge.classList.remove('hidden');
         alpBadge.classList.add('inline-flex');
+
+        const pnl = currentAlpaca.day_pnl !== undefined ? currentAlpaca.day_pnl : (currentPortfolio.total_profit_loss || 0);
+        pnlElem.textContent = (pnl >= 0 ? '+$' : '-$') + Math.abs(pnl).toFixed(2);
+        pnlElem.className = pnl > 0 ? "font-bold text-emerald-400 ml-1" : (pnl < 0 ? "font-bold text-rose-400 ml-1" : "font-bold text-slate-200 ml-1");
+
+        const posCount = (currentAlpaca.positions && currentAlpaca.positions.length) || (currentPortfolio.positions || []).length;
+        document.getElementById('badgePositionsCount').textContent = posCount;
       } else {
         label.textContent = "Cassa Libera:";
         cashElem.textContent = '$' + Number(currentPortfolio.cash).toLocaleString(undefined, {minimumFractionDigits: 2});
         alpBadge.classList.add('hidden');
         alpBadge.classList.remove('inline-flex');
+
+        const pnl = currentPortfolio.total_profit_loss || 0;
+        pnlElem.textContent = (pnl >= 0 ? '+$' : '-$') + Math.abs(pnl).toFixed(2);
+        pnlElem.className = pnl > 0 ? "font-bold text-emerald-400 ml-1" : (pnl < 0 ? "font-bold text-rose-400 ml-1" : "font-bold text-slate-200 ml-1");
+        document.getElementById('badgePositionsCount').textContent = (currentPortfolio.positions || []).length;
       }
     }
 
@@ -1001,14 +1008,48 @@
       const container = document.getElementById('portfolioPositionsContainer');
       const positions = currentPortfolio.positions || [];
 
-      if (positions.length === 0) {
+      // Se Alpaca è attivo e ha posizioni reali aperte, mostrale con priorità assoluta!
+      if (currentAlpaca && currentAlpaca.connected && currentAlpaca.positions && currentAlpaca.positions.length > 0) {
+        container.innerHTML = currentAlpaca.positions.map(pos => {
+          const pl = parseFloat(pos.unrealized_pl || 0);
+          const plpc = (parseFloat(pos.unrealized_plpc || 0) * 100).toFixed(2);
+          const plClass = pl >= 0 ? "text-emerald-400 font-bold" : "text-rose-400 font-bold";
+          const plSign = pl >= 0 ? "+" : "";
+          const entryPr = parseFloat(pos.avg_entry_price || 0).toFixed(2);
+          const currPr = parseFloat(pos.current_price || 0).toFixed(2);
+          const mktVal = parseFloat(pos.market_value || 0).toFixed(2);
+
+          return `
+            <div class="glass p-6 rounded-2xl border border-emerald-500/40 shadow-lg shadow-emerald-500/5 flex flex-col md:flex-row md:items-center justify-between gap-4">
+              <div class="space-y-1">
+                <div class="flex items-center space-x-2">
+                  <h3 class="text-2xl font-extrabold text-white font-mono">${pos.symbol}</h3>
+                  <span class="px-2 py-0.5 rounded text-xs font-mono font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">🟢 ALPACA PAPER LIVE</span>
+                  <span class="text-xs text-slate-400 font-mono">${pos.qty} Azioni</span>
+                </div>
+                <div class="flex flex-wrap gap-x-6 gap-y-1 text-xs text-slate-300 pt-1 font-mono">
+                  <div>Prezzo Carico: <span class="font-bold text-slate-200">$${entryPr}</span></div>
+                  <div>Prezzo Attuale: <span class="font-bold text-white">$${currPr}</span></div>
+                  <div>Valore Controvalore: <span class="font-bold text-slate-200">$${mktVal}</span></div>
+                  <div>P&L Non Realizzato: <span class="${plClass}">${plSign}$${pl.toFixed(2)} (${plSign}${plpc}%)</span></div>
+                </div>
+              </div>
+              <div class="flex items-center space-x-2 pt-2 md:pt-0">
+                <button onclick="closeAlpacaPosition('${pos.symbol}')" class="px-3.5 py-2 bg-rose-600/80 hover:bg-rose-600 text-white rounded-xl text-xs font-bold transition flex items-center space-x-1" title="Chiudi la posizione a mercato su Alpaca">
+                  <span>🛑 Chiudi su Alpaca</span>
+                </button>
+              </div>
+            </div>
+          `;
+        }).join('');
+      } else if (positions.length === 0) {
         container.innerHTML = `
           <div class="glass p-12 text-center rounded-2xl border border-slate-800 space-y-3">
             <div class="w-12 h-12 rounded-full bg-slate-800 flex items-center justify-center mx-auto text-slate-400">
               <i data-lucide="inbox" class="w-6 h-6"></i>
             </div>
-            <h3 class="text-base font-bold text-white">Nessuna Posizione Aperta</h3>
-            <p class="text-xs text-slate-400 max-w-sm mx-auto">Vai nella sezione "Scanner & Consigliati" o nella "Time Machine" per acquistare il tuo primo titolo in simulazione!</p>
+            <h3 class="text-base font-bold text-white">Nessuna Posizione Aperta al Momento</h3>
+            <p class="text-xs text-slate-400 max-w-sm mx-auto">Tutte le posizioni precedenti sono state chiuse o non ci sono ordini pendenti sul mercato.</p>
             <button onclick="switchTab('tab-scanner')" class="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs rounded-xl transition">
               Guarda i Titoli Consigliati →
             </button>
@@ -1083,6 +1124,26 @@
         renderPortfolioUI();
       } catch (e) {
         alert("Errore chiusura: " + e.message);
+      }
+    }
+
+    async function closeAlpacaPosition(symbol) {
+      if (!confirm(`Sei sicuro di voler chiudere la posizione su ${symbol} a mercato su Alpaca?`)) return;
+      try {
+        const res = await fetch('/api/close-position', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ symbol: symbol, exit_type: 'MANUAL' })
+        });
+        const data = await res.json();
+        if (data.success) {
+          alert(`Posizione ${symbol} chiusa con successo su Alpaca!`);
+          loadStatus();
+        } else {
+          alert("Errore chiusura Alpaca: " + (data.error || "Errore sconosciuto"));
+        }
+      } catch (e) {
+        alert("Errore rete: " + e.message);
       }
     }
 
